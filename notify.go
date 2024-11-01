@@ -11,6 +11,7 @@ type Notify interface {
 	SetupNamespaces(pid int32) error
 	PostSetupNamespaces() error
 	PostResume() error
+	OrphanPtsMaster(fd int) error
 }
 
 // NoNotify struct
@@ -58,5 +59,9 @@ func (c NoNotify) PostSetupNamespaces() error {
 
 // PostResume NoNotify
 func (c NoNotify) PostResume() error {
+	return nil
+}
+
+func (c NoNotify) OrphanPtsMaster(fd int) error {
 	return nil
 }

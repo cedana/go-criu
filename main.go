@@ -3,6 +3,7 @@ package criu
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,7 +16,7 @@ import (
 // Criu struct
 type Criu struct {
 	swrkCmd  *exec.Cmd
-	swrkSk   *os.File
+	swrkSk   *net.UnixConn
 	swrkPath string
 }
 
@@ -40,7 +41,11 @@ func (c *Criu) Prepare() error {
 	}
 
 	cln := os.NewFile(uintptr(fds[0]), "criu-xprt-cln")
-	syscall.CloseOnExec(fds[0])
+	clnNet, err := net.FileConn(cln)
+	cln.Close()
+	if err != nil {
+		return err
+	}
 	srv := os.NewFile(uintptr(fds[1]), "criu-xprt-srv")
 	defer srv.Close()
 
@@ -55,7 +60,7 @@ func (c *Criu) Prepare() error {
 	}
 
 	c.swrkCmd = cmd
-	c.swrkSk = cln
+	c.swrkSk = clnNet.(*net.UnixConn)
 
 	return nil
 }
@@ -76,20 +81,21 @@ func (c *Criu) Cleanup() error {
 	return errors.Join(errs...)
 }
 
-func (c *Criu) sendAndRecv(reqB []byte) ([]byte, int, error) {
+func (c *Criu) sendAndRecv(reqB []byte) (respB []byte, n int, oobB []byte, oobn int, err error) {
 	cln := c.swrkSk
-	_, err := cln.Write(reqB)
+	_, err = cln.Write(reqB)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, 0, err
 	}
 
-	respB := make([]byte, 2*4096)
-	n, err := cln.Read(respB)
+	respB = make([]byte, 2*4096)
+	oobB = make([]byte, 4096)
+	n, oobn, _, _, err = cln.ReadMsgUnix(respB, oobB)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, 0, err
 	}
 
-	return respB, n, nil
+	return
 }
 
 func (c *Criu) doSwrk(reqType rpc.CriuReqType, opts *rpc.CriuOpts, nfy Notify) error {
@@ -140,7 +146,7 @@ func (c *Criu) doSwrkWithResp(reqType rpc.CriuReqType, opts *rpc.CriuOpts, nfy N
 			return nil, err
 		}
 
-		respB, respS, err := c.sendAndRecv(reqB)
+		respB, respS, oobB, oobn, err := c.sendAndRecv(reqB)
 		if err != nil {
 			return nil, err
 		}
@@ -184,6 +190,19 @@ func (c *Criu) doSwrkWithResp(reqType rpc.CriuReqType, opts *rpc.CriuOpts, nfy N
 			err = nfy.PostSetupNamespaces()
 		case "post-resume":
 			err = nfy.PostResume()
+		case "orphan-pts-master":
+			scm, err := syscall.ParseSocketControlMessage(oobB[:oobn])
+			if err != nil {
+				return nil, err
+			}
+			fds, err := syscall.ParseUnixRights(&scm[0])
+			if err != nil {
+				return nil, err
+			}
+			err = nfy.OrphanPtsMaster(fds[0])
+			if err != nil {
+				return nil, err
+			}
 		default:
 			err = nil
 		}
